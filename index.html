@@ -83,7 +83,7 @@ dialog p{font-size:15px}dialog .plain{width:100%;margin-top:10px}table{width:100
 
 </div></main>
 <dialog id="confirmNew"><h2>Новый лист?</h2><p>Текущий результат останется в таблице рекордов. Продолжить эту карту после начала новой игры не получится.</p><button id="confirmStart" class="plain">Начать новую игру</button><button id="cancelNew" class="plain">Вернуться</button></dialog>
-<dialog id="records"><h2>Лучшие результаты</h2><p>На этом устройстве · текущая игра тоже учитывается</p><table><thead><tr><th>№</th><th>Дата</th><th>Слова</th><th>Очки</th></tr></thead><tbody id="recordRows"></tbody></table><p id="emptyRecords">Первый разгаданный вопрос начнёт вашу историю.</p><p>За слово: сложность × 10 + число букв. За пять ответов подряд без ошибок и подсказок: ещё 25 очков. Монета — только за ответ без ошибок и подсказок.</p><button id="closeRecords" class="plain">Закрыть</button></dialog>
+<dialog id="records"><h2>Лучшие результаты</h2><p>На этом устройстве · текущая игра тоже учитывается</p><table><thead><tr><th>№</th><th>Дата</th><th>Слова</th><th>Очки</th></tr></thead><tbody id="recordRows"></tbody></table><p id="emptyRecords">Первый разгаданный вопрос начнёт вашу историю.</p><p>За слово: сложность × 10 + число букв. За пять ответов подряд без ошибок и подсказок: ещё 25 очков. Монета — только за ответ без ошибок и подсказок.</p><p style="font-size:12px;color:var(--muted)">Словарная база: <a href="https://ru.wiktionary.org/" target="_blank" rel="noopener">Викисловарь</a>, обработка Wiktextract/Kaikki, CC BY-SA.</p><button id="closeRecords" class="plain">Закрыть</button></dialog>
 <script>
 "use strict";
 (()=> {
@@ -127,6 +127,33 @@ function place(e,x,y,dir,solved=false){
 }
 const letterIndex=new Map();
 for(const e of DATA)for(const c of new Set(e[0])){if(!letterIndex.has(c))letterIndex.set(c,[]);letterIndex.get(c).push(e)}
+const bankLoaded=new Set(),bankLoading=new Map(),knownQuestions=new Set(DATA.map(e=>e[0]+"\u0000"+e[1]));
+let bankManifest=null;
+function bankHash(text){let h=2166136261;for(const c of text)h=Math.imul(h^c.charCodeAt(0),16777619);return h>>>0}
+function addBankRows(rows){
+ let added=0;
+ for(const e of rows){
+  if(!Array.isArray(e)||e.length!==3||!/^[А-Я]{3,18}$/.test(e[0])||typeof e[1]!=="string"||e[1].length<3||e[1].length>180||e[2]<1||e[2]>10)continue;
+  const key=e[0]+"\u0000"+e[1];if(knownQuestions.has(key))continue;knownQuestions.add(key);DATA.push(e);added++;
+  for(const c of new Set(e[0])){if(!letterIndex.has(c))letterIndex.set(c,[]);letterIndex.get(c).push(e)}
+ }
+ return added;
+}
+async function ensureBankLevel(level,offset=0){
+ if(!bankManifest||typeof fetch!=="function")return 0;
+ level=Math.max(1,Math.min(10,Math.round(level)));const info=bankManifest.levels[String(level)];if(!info?.chunks?.length)return 0;
+ const part=(bankHash((runId||"new")+":"+level)+offset)%info.chunks.length,file=info.chunks[part].file,key=level+":"+part;
+ if(bankLoaded.has(key))return 0;if(bankLoading.has(key))return bankLoading.get(key);
+ const task=fetch("data/questions/"+file,{cache:"force-cache"}).then(r=>{if(!r.ok)throw new Error("question bank "+r.status);return r.json()}).then(rows=>{const added=addBankRows(rows);bankLoaded.add(key);return added}).catch(()=>0).finally(()=>bankLoading.delete(key));
+ bankLoading.set(key,task);return task;
+}
+async function initQuestionBank(){
+ if(typeof fetch!=="function")return;
+ try{const r=await fetch("data/questions/manifest.json",{cache:"force-cache"});if(!r.ok)return;bankManifest=await r.json();
+  // The first session gets a compact mix of easy and challenging clues.
+  await Promise.all([1,2,3,4,5].map(level=>ensureBankLevel(level)));
+ }catch{}
+}
 function expand(parent,wanted=3,relaxed=false){
  let made=0;const dir=parent.dir==="h"?"v":"h",r=radius(parent),target=targetDifficulty(r);
  for(const [px,py,i] of shuffled(cells(parent))){
@@ -284,6 +311,7 @@ function check(){
  streak=w.hinted||w.mistake?0:streak+1;bestStreak=Math.max(bestStreak,streak);
  const bonus=streak>0&&streak%5===0?25:0;points+=w.d*10+w.a.length+bonus;const reward=!w.mistake&&!w.hinted?1:0;coins+=reward;
  flash=w.id;draw();hud();expand(w,3);frontier();recordRun();saveNow();
+ if(score%40===0){const level=Math.min(10,2+Math.floor(radius(w)/30));ensureBankLevel(level,Math.floor(score/40)).then(()=>frontier())}
  const next=nextNear(w);toastMsg(levelAt(score)>levelAt(score-1)?"Уровень "+levelAt(score)+"!":reward?"Верно · +1 монета":"Верно");
  nextTimer=setTimeout(()=>{
   if(menuOpen)return;flash=null;busy=false;selected=null;
@@ -436,6 +464,7 @@ addEventListener("resize",resize);addEventListener("pagehide",saveNow);document.
 records=storageRead(RECORDS)||[];if(!Array.isArray(records))records=[];
 const restored=load();
 if(restored)frontier();hud();resize();showMenu();
+initQuestionBank();
 
 })();
 </script>
