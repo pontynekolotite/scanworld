@@ -194,6 +194,7 @@ function frontier(){
  const ready=words.filter(eligible);
  for(const w of ready.slice(-24))if(neighbours(w).length<3)expand(w,2);
  for(const w of words.filter(eligible))if(w.openedAt==null)w.openedAt=score;
+ syncFog();
  return words.filter(eligible);
 }
 function fixedAt(w,i){const [x,y]=cells(w)[i],k=KEY(x,y),b=board.get(k);return revealed.has(k)||byId.get(b.h)?.solved||byId.get(b.v)?.solved?b.c:""}
@@ -209,6 +210,7 @@ function nextNear(w,skip=false){
 }
 function distance(a,b){return Math.hypot(a.x+(a.dir==="h"?a.a.length/2:0)-b.x-(b.dir==="h"?b.a.length/2:0),a.y+(a.dir==="v"?a.a.length/2:0)-b.y-(b.dir==="v"?b.a.length/2:0))}
 function resetState(){
+ resetFog();
  skipped.clear();
  cancelTransitions();words=[];board.clear();clues.clear();used.clear();byId.clear();revealed.clear();nextId=1;clueCache.clear();
  coins=12;score=0;points=0;streak=0;bestStreak=0;hints=0;selected=null;lastSelected=null;buffer=[];
@@ -310,7 +312,7 @@ function check(){
  const w=selected;busy=true;w.solved=true;w.draft=null;score++;
  streak=w.hinted||w.mistake?0:streak+1;bestStreak=Math.max(bestStreak,streak);
  const bonus=streak>0&&streak%5===0?25:0;points+=w.d*10+w.a.length+bonus;const reward=!w.mistake&&!w.hinted?1:0;coins+=reward;
- flash=w.id;draw();hud();expand(w,3);frontier();recordRun();saveNow();
+ flash=w.id;hud();expand(w,3);frontier();draw();recordRun();saveNow();
  if(score%40===0){const level=Math.min(10,2+Math.floor(radius(w)/30));ensureBankLevel(level,Math.floor(score/40)).then(()=>frontier())}
  const next=nextNear(w);toastMsg(levelAt(score)>levelAt(score-1)?"Уровень "+levelAt(score)+"!":reward?"Верно · +1 монета":"Верно");
  nextTimer=setTimeout(()=>{
@@ -333,11 +335,11 @@ function center(w,immediate=false){
  const cellWidth=w.dir==="h"?n+1:1,cellHeight=w.dir==="v"?n+1:1;
  const availableW=Math.max(80,r.right-r.left),availableH=Math.max(80,r.bottom-r.top);
  const fit=Math.min(1.25,availableW/(CELL*(cellWidth+1)),availableH/(CELL*(cellHeight+1)));
- zoom=Math.max(.32,fit);
- const cc=size(),mx=(w.x+(w.dir==="h"?(n-1)/2:.5))*cc,my=(w.y+(w.dir==="v"?(n-1)/2:.5))*cc;
+ const fromZoom=zoom,toZoom=Math.max(.32,fit);
+ const cc=CELL*toZoom,mx=(w.x+(w.dir==="h"?(n-1)/2:.5))*cc,my=(w.y+(w.dir==="v"?(n-1)/2:.5))*cc;
  const tx=mx+W/2-(r.left+r.right)/2,ty=my+H/2-(r.top+r.bottom)/2,ox=cam.x,oy=cam.y,t0=performance.now();
- if(immediate||!motion()){cam={x:tx,y:ty};draw();return}
- function frame(t){const k=Math.min(1,(t-t0)/280),ease=1-Math.pow(1-k,3);cam.x=ox+(tx-ox)*ease;cam.y=oy+(ty-oy)*ease;draw();if(k<1)animation=requestAnimationFrame(frame);else save()}
+ if(immediate||!motion()){zoom=toZoom;cam={x:tx,y:ty};draw();return}
+ function frame(t){const k=Math.min(1,(t-t0)/360),ease=1-Math.pow(1-k,3);zoom=fromZoom+(toZoom-fromZoom)*ease;cam.x=(ox/c+(tx/cc-ox/c)*ease)*size();cam.y=(oy/c+(ty/cc-oy/c)*ease)*size();requestDraw();if(k<1)animation=requestAnimationFrame(frame);else save()}
  animation=requestAnimationFrame(frame);
 }
 function resize(){
@@ -365,32 +367,74 @@ function fitClue(q,c){
  answer=answer||{font:2,lines:textLines(q,width),lineHeight:2.28,width,height};
  if(clueCache.size>3000)clueCache.clear();clueCache.set(cacheKey,answer);return answer;
 }
-function drawClouds(a,b,c,readyIds){
- // Hand-drawn, world-anchored clouds hide only the unexplored cells.
- const open=new Set();
- for(let y=a[1]-3;y<=b[1]+3;y++)for(let x=a[0]-3;x<=b[0]+3;x++){
-  const v=board.get(KEY(x,y)),q=byId.get(clues.get(KEY(x,y)));
-  if((v&&[v.h,v.v].some(id=>readyIds.has(id)))||(q&&readyIds.has(q.id))){
-   for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++)open.add(KEY(x+dx,y+dy));
+// Cloud artwork and soft openings are baked once, then composited as images.
+// All positions are in world cells, so panning never restarts a reveal.
+const fogLayer=document.createElement('canvas'),fogCtx=fogLayer.getContext('2d');
+const fogTile=document.createElement('canvas'),fogSprites=new Map(),fogOpen=new Map();
+let fogReady=new Set(),fogInitialized=false,fogRAF=0,renderRAF=0;
+const FOG_TIME=880;
+function resetFog(){cancelAnimationFrame(fogRAF);fogRAF=0;fogOpen.clear();fogReady.clear();fogInitialized=false}
+function syncFog(){
+ const now=performance.now(),animate=fogInitialized&&!menuOpen&&motion();
+ fogReady=new Set(words.filter(w=>w.solved||eligible(w)).map(w=>w.id));
+ for(const id of fogReady)if(!fogOpen.has(id))fogOpen.set(id,{w:byId.get(id),start:animate?now:now-FOG_TIME});
+ fogInitialized=true;
+}
+function makeFogTile(){
+ if(fogTile.width===512)return;
+ fogTile.width=fogTile.height=512;const g=fogTile.getContext('2d');
+ g.fillStyle='#e8edf0';g.fillRect(0,0,512,512);
+ let seed=917;const rand=()=>{seed=(Math.imul(seed,1664525)+1013904223)>>>0;return seed/4294967296};
+ for(let i=0;i<85;i++){
+  const x=rand()*512,y=rand()*512,r=30+rand()*65;
+  // Wrap stamps on both axes to keep the repeated texture seamless.
+  for(const dx of [-512,0,512])for(const dy of [-512,0,512]){
+   const cx=x+dx,cy=y+dy,gradient=g.createRadialGradient(cx,cy,0,cx,cy,r);
+   gradient.addColorStop(0,'rgba(255,253,247,.7)');gradient.addColorStop(1,'rgba(255,253,247,0)');
+   g.fillStyle=gradient;g.fillRect(cx-r,cy-r,r*2,r*2);
   }
  }
- ctx.save();ctx.beginPath();
- for(let y=a[1]-1;y<=b[1]+1;y++)for(let x=a[0]-1;x<=b[0]+1;x++)if(!open.has(KEY(x,y))){const [sx,sy]=w2s(x,y);ctx.rect(sx,sy,c+.5,c+.5)}
- ctx.clip();ctx.fillStyle='#edece5';ctx.fillRect(0,0,W,H);
- for(let y=Math.floor(a[1]/3)*3-3;y<=b[1]+3;y+=3)for(let x=Math.floor(a[0]/4)*4-4;x<=b[0]+4;x+=4){
-  const [sx,sy]=w2s(x+(Math.abs(y)%2)*.6,y);ctx.beginPath();
-  ctx.moveTo(sx,sy+c*1.8);
-  ctx.bezierCurveTo(sx-c*.5,sy+c,sx+c*.1,sy+c*.5,sx+c*.7,sy+c*.8);
-  ctx.bezierCurveTo(sx+c*.7,sy-c*.1,sx+c*2,sy-c*.2,sx+c*2.3,sy+c*.6);
-  ctx.bezierCurveTo(sx+c*3,sy+c*.1,sx+c*3.8,sy+c*.8,sx+c*3.5,sy+c*1.4);
-  ctx.bezierCurveTo(sx+c*4.2,sy+c*2.5,sx+c*2.5,sy+c*2.8,sx+c*2,sy+c*2.3);
-  ctx.bezierCurveTo(sx+c,sy+c*2.8,sx-c*.3,sy+c*2.6,sx,sy+c*1.8);
-  ctx.closePath();ctx.fillStyle='#faf9f3';ctx.fill();ctx.strokeStyle='#ceccc2';ctx.lineWidth=.9;ctx.stroke();
+}
+function fogSprite(w){
+ const key=w.dir+':'+w.a.length;if(fogSprites.has(key))return fogSprites.get(key);
+ const s=48,pad=1.6,n=w.a.length,canvas=document.createElement('canvas');
+ canvas.width=Math.ceil((w.dir==='h'?n+pad*2:pad*2)*s);
+ canvas.height=Math.ceil((w.dir==='v'?n+pad*2:pad*2)*s);
+ const g=canvas.getContext('2d');g.lineCap='round';
+ // Opaque core keeps the entire question and answer legible, with a feathered edge.
+ for(let j=24;j>=0;j--){
+  const radius=1.02+j/24*.55;
+  g.strokeStyle=j===0?'#000':'rgba(0,0,0,.12)';g.lineWidth=radius*2*s;
+  g.beginPath();g.moveTo(pad*s,pad*s);
+  g.lineTo((pad+(w.dir==='h'?n:0))*s,(pad+(w.dir==='v'?n:0))*s);g.stroke();
  }
- ctx.restore();
+ fogSprites.set(key,canvas);return canvas;
+}
+function requestDraw(){if(!renderRAF)renderRAF=requestAnimationFrame(()=>{renderRAF=0;draw()})}
+function drawClouds(a,b,c){
+ if(!fogInitialized)syncFog();makeFogTile();
+ const scale=Math.min(devicePixelRatio||1,1.25),width=Math.ceil(W*scale),height=Math.ceil(H*scale);
+ if(fogLayer.width!==width||fogLayer.height!==height){fogLayer.width=width;fogLayer.height=height}
+ const g=fogCtx;g.setTransform(scale,0,0,scale,0,0);g.globalCompositeOperation='source-over';g.globalAlpha=1;
+ const period=12*c;
+ for(let y=Math.floor(a[1]/12)*12;y<=b[1]+12;y+=12)for(let x=Math.floor(a[0]/12)*12;x<=b[0]+12;x+=12){
+  const [sx,sy]=w2s(x,y);g.drawImage(fogTile,sx,sy,period+.5,period+.5);
+ }
+ g.globalCompositeOperation='destination-out';const now=performance.now();let active=false;
+ for(const {w,start} of fogOpen.values()){
+  const k=motion()?Math.max(0,Math.min(1,(now-start)/FOG_TIME)):1;
+  if(k<1)active=true;
+  const ease=1-Math.pow(1-k,3),sprite=fogSprite(w);
+  const x=w.x+(w.dir==='h'?-.5:.5),y=w.y+(w.dir==='v'?-.5:.5);
+  const [sx,sy]=w2s(x-1.6,y-1.6),sw=sprite.width/48*c,sh=sprite.height/48*c;
+  if(sx>W||sy>H||sx+sw<0||sy+sh<0)continue;
+  g.globalAlpha=ease;const growth=.84+.16*ease;
+  g.drawImage(sprite,sx+sw*(1-growth)/2,sy+sh*(1-growth)/2,sw*growth,sh*growth);
+ }
+ g.globalAlpha=1;g.globalCompositeOperation='source-over';ctx.drawImage(fogLayer,0,0,W,H);
+ if(active&&!menuOpen&&!document.hidden&&!fogRAF)fogRAF=requestAnimationFrame(()=>{fogRAF=0;requestDraw()});
 }
 function draw(){
- const readyIds=new Set(words.filter(w=>w.solved||eligible(w)).map(w=>w.id));
  const c=size();ctx.fillStyle="#f4f2eb";ctx.fillRect(0,0,W,H);
  // Fine graphite grid is geometry, not an image; all content remains sharp at every zoom.
  const a=s2w(0,0),b=s2w(W,H);ctx.strokeStyle="#dfdcd3";ctx.lineWidth=.6;
@@ -400,7 +444,7 @@ function draw(){
  const visible=(sx,sy)=>sx+c>=0&&sy+c>=0&&sx<W&&sy<H;
  for(let y=a[1]-1;y<=b[1]+1;y++)for(let x=a[0]-1;x<=b[0]+1;x++){
   const k=KEY(x,y),v=board.get(k);if(!v)continue;const [sx,sy]=w2s(x,y);if(!visible(sx,sy))continue;
-  const owners=[byId.get(v.h),byId.get(v.v)].filter(Boolean),solved=owners.some(w=>w.solved),active=sel.has(k),ready=owners.some(eligible);
+  const owners=[byId.get(v.h),byId.get(v.v)].filter(Boolean),solved=owners.some(w=>w.solved),active=sel.has(k),ready=owners.some(w=>fogReady.has(w.id));
   ctx.fillStyle=flash&&owners.some(w=>w.id===flash)?"#cce4ff":active?"#dfebf8":ready||solved?"#fffdf7":"#eae7de";
   ctx.fillRect(sx,sy,c,c);ctx.strokeStyle=active?"#2974b9":"#8f8c82";ctx.lineWidth=active?1.7:.9;ctx.strokeRect(sx+.5,sy+.5,c-1,c-1);
   const letter=solved||revealed.has(k)?v.c:active?buffer[sel.get(k)]:"";
@@ -415,7 +459,7 @@ function draw(){
   let ty=sy+5+(fit.height-fit.lines.length*fit.lineHeight)/2;for(const line of fit.lines){ctx.fillText(line,sx+c/2,ty);ty+=fit.lineHeight}ctx.restore();
 
  }
- drawClouds(a,b,c,readyIds);
+ drawClouds(a,b,c);
 }
 function tap(sx,sy){
  if(menuOpen||busy)return;const [x,y]=s2w(sx,sy),k=KEY(x,y),b=board.get(k),id=clues.get(k);
@@ -433,7 +477,7 @@ cv.addEventListener("pointerdown",e=>{
 cv.addEventListener("pointermove",e=>{
  const p=pointers.get(e.pointerId);if(!p)return;const dx=e.clientX-p.x,dy=e.clientY-p.y;p.x=e.clientX;p.y=e.clientY;
  if(pointers.size===2){const [a,b]=[...pointers.values()];zoom=Math.max(.32,Math.min(1.8,zoomStart*Math.hypot(a.x-b.x,a.y-b.y)/(pinchStart||1)));cam.x=anchor.x*size()-(a.x+b.x)/2+W/2;cam.y=anchor.y*size()-(a.y+b.y)/2+H/2}
- else{cam.x-=dx;cam.y-=dy;moved+=Math.abs(dx)+Math.abs(dy)}draw();
+ else{cam.x-=dx;cam.y-=dy;moved+=Math.abs(dx)+Math.abs(dy)}requestDraw();
 });
 cv.addEventListener("pointerup",e=>{pointers.delete(e.pointerId);if(!gesture&&moved<8)tap(e.clientX,e.clientY);save()});
 cv.addEventListener("pointercancel",e=>{pointers.delete(e.pointerId);gesture=true});
