@@ -1,15 +1,15 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert');
 const html=fs.readFileSync(__dirname+'/index.html','utf8');
 let js=html.split('<script>')[1].split('</script>')[0];new vm.Script(js);
-function harness(saved={},width=390,height=844){
+function harness(saved={},width=390,height=844,reduced=true){
  const elements={},storage=new Map(Object.entries(saved)),timers=new Map();let timerId=0;
- const ctx=new Proxy({measureText(t){return {width:t.length*5}}},{get(t,k){return k in t?t[k]:(()=>{})},set(t,k,v){t[k]=v;return true}});
+ const ctx=new Proxy({measureText(t){return {width:t.length*5}},createRadialGradient(){return {addColorStop(){}}}},{get(t,k){return k in t?t[k]:(()=>{})},set(t,k,v){t[k]=v;return true}});
  function el(id){return elements[id]||(elements[id]={id,hidden:false,style:{setProperty(){}},classList:{add(){},remove(){}},children:[],getContext(){return ctx},getBoundingClientRect(){return id==='hud'?{bottom:62}:width>=900?{left:width-380,top:62}:{left:0,top:height-325}},append(x){this.children.push(x)},replaceChildren(){this.children=[]},setAttribute(){},addEventListener(){},showModal(){this.open=true},close(){this.open=false}})}
  const doc={getElementById:el,createElement:()=>el('new'+Math.random()),querySelector:()=>null,addEventListener(){}};
- const sandbox={document:doc,window:{},localStorage:{getItem:k=>storage.get(k)||null,setItem:(k,v)=>storage.set(k,v)},innerWidth:width,innerHeight:height,devicePixelRatio:1,performance:{now:()=>0},matchMedia:()=>({matches:true}),addEventListener(){},setTimeout:(fn)=>{timers.set(++timerId,fn);return timerId},clearTimeout:id=>timers.delete(id),requestAnimationFrame:()=>0,cancelAnimationFrame(){},console};
+ let now=0;const sandbox={document:doc,window:{},localStorage:{getItem:k=>storage.get(k)||null,setItem:(k,v)=>storage.set(k,v)},innerWidth:width,innerHeight:height,devicePixelRatio:1,performance:{now:()=>now},matchMedia:()=>({matches:reduced}),addEventListener(){},setTimeout:(fn)=>{timers.set(++timerId,fn);return timerId},clearTimeout:id=>timers.delete(id),requestAnimationFrame:()=>0,cancelAnimationFrame(){},console};
  const injected=js.replace(/\}\)\(\);\s*$/,'globalThis.test={levelAt,levelGoal,resetState,resume,expand,frontier,nextNear,canPlace,select,type,check,hint,showMenu,load,saveNow,recordRun,fitClue,cells,eligible,pack,get(){return {words,board,clues,byId,coins,score,points,selected,buffer,cursor,records,revealed,DATA,menuOpen}}};})();');
- vm.runInNewContext(injected,sandbox);
- return {api:sandbox.test,storage,elements,timers,flush(){for(const [id,fn]of [...timers]){timers.delete(id);fn()}}};
+ vm.runInNewContext(injected.replace('globalThis.test={','globalThis.test={fogState:()=>[...fogOpen].map(([id,v])=>({id,start:v.start})),syncFog,draw,'),sandbox);
+ return {api:sandbox.test,storage,elements,timers,setTime(t){now=t},flush(){for(const [id,fn]of [...timers]){timers.delete(id);fn()}}};
 }
 const a=harness();a.api.resetState();a.api.resume();
 let state=a.api.get();assert(state.DATA.length>1000);
@@ -58,4 +58,16 @@ for(const [width,height]of [[320,568],[390,844],[430,932],[844,390],[1366,768]])
  const restored=harness(Object.fromEntries(mobile.storage),width,height);restored.api.resume();
  assert(restored.api.get().selected);assert(restored.api.get().selected.hinted);
 }
-console.log(JSON.stringify({questions:state.DATA.length,answers:count,generated:state.words.length,seconds:(Date.now()-t0)/1000,checks:'geometry, save/load, hints reset, record deduplication, stale answer, menu'},null,2));
+const fog=harness({},390,844,false);fog.api.resetState();fog.api.resume();
+fog.setTime(1000);const before=new Map(fog.api.fogState().map(v=>[v.id,v.start]));
+const pending=fog.api.get().words.find(fog.api.eligible);fog.api.select(pending.id);
+while(fog.api.get().buffer.some(v=>!v))fog.api.type(pending.a[fog.api.get().cursor]);
+fog.api.check();const opened=fog.api.fogState().filter(v=>!before.has(v.id));assert(opened.length,'answer must reveal new words');
+assert(opened.every(v=>v.start===1000),'new openings share the answer timestamp');
+fog.setTime(1170);fog.api.syncFog();
+assert(fog.api.fogState().every(v=>v.start===(before.get(v.id)??1000)),'sync must not restart active or completed openings');
+fog.api.showMenu();fog.api.resume();assert(fog.api.fogState().every(v=>v.start===(before.get(v.id)??1000)),'menu must not replay openings');
+fog.api.saveNow();const reloaded=harness(Object.fromEntries(fog.storage),390,844,false);
+assert(reloaded.api.fogState().every(v=>v.start<0),'saved open areas load immediately');
+fog.api.resetState();assert(fog.api.fogState().every(v=>v.start<1170),'new game clears old transitions');
+console.log(JSON.stringify({questions:state.DATA.length,answers:count,generated:state.words.length,seconds:(Date.now()-t0)/1000,checks:'geometry, save/load, economy, levels, Other, mobile/desktop, cloud reveal lifecycle and menu'},null,2));
